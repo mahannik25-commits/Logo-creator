@@ -1,0 +1,526 @@
+<!DOCTYPE html>
+<html lang="fa" dir="rtl">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>فروشگاه لوگو با فایراستور | لوگو شاپ</title>
+    
+    <!-- فونت و آیکون‌ها -->
+    <link href="https://cdn.jsdelivr.net/gh/rastikerdar/vazirmatn@v33.003/Vazirmatn-font-face.css" rel="stylesheet" type="text/css" />
+    <script src="https://unpkg.com/lucide@latest"></script>
+    
+    <!-- استایل‌ها (Tailwind CSS) -->
+    <script src="https://cdn.tailwindcss.com"></script>
+    
+    <script type="module">
+        // ===========================================
+        // 1. وارد کردن ماژول‌های فایربیس
+        // ===========================================
+        import { initializeApp } from "https://www.gstatic.com/firebasejs/11.6.1/firebase-app.js";
+        import { getAuth, signInAnonymously, signInWithCustomToken, onAuthStateChanged } from "https://www.gstatic.com/firebasejs/11.6.1/firebase-auth.js";
+        import { getFirestore, doc, addDoc, onSnapshot, collection, query, serverTimestamp, setLogLevel } from "https://www.gstatic.com/firebasejs/11.6.1/firebase-firestore.js";
+
+        // برای نمایش لاگ‌های فایربیس در کنسول (اختیاری)
+        setLogLevel('Debug');
+
+        // ===========================================
+        // 2. تنظیمات و متغیرهای سراسری (GLOBAL)
+        // ===========================================
+        const firebaseConfig = JSON.parse(typeof __firebase_config !== 'undefined' ? __firebase_config : '{}');
+        const appId = typeof __app_id !== 'undefined' ? __app_id : 'default-app-id';
+        const initialAuthToken = typeof __initial_auth_token !== 'undefined' ? __initial_auth_token : null;
+
+        let app, db, auth;
+        let currentUserId = null;
+        let products = [];
+        let cart = [];
+        
+        // تابع قالب‌بندی قیمت به تومان
+        window.formatPrice = (price) => new Intl.NumberFormat('fa-IR').format(price) + ' تومان';
+        
+        // ===========================================
+        // 3. توابع هسته (Core Functions)
+        // ===========================================
+
+        // راه‌اندازی فایربیس و احراز هویت
+        async function initFirebase() {
+            try {
+                app = initializeApp(firebaseConfig);
+                auth = getAuth(app);
+                db = getFirestore(app);
+
+                // احراز هویت با توکن سفارشی یا ناشناس
+                if (initialAuthToken) {
+                    await signInWithCustomToken(auth, initialAuthToken);
+                } else {
+                    // در صورت عدم وجود توکن، به صورت ناشناس وارد می‌شود (که برای بازدیدکنندگان عمومی کافی است)
+                    await signInAnonymously(auth);
+                }
+
+                // گوش دادن به تغییرات وضعیت احراز هویت
+                onAuthStateChanged(auth, (user) => {
+                    if (user) {
+                        currentUserId = user.uid;
+                        // نمایش پنل مدیریت برای کاربر سازنده
+                        toggleAdminPanel(true);
+                        startDataListener(); // شروع گوش دادن به داده‌ها بعد از احراز هویت
+                    } else {
+                        currentUserId = null;
+                        toggleAdminPanel(false);
+                        startDataListener(true); // شروع گوش دادن به داده‌ها برای بازدیدکنندگان ناشناس
+                    }
+                });
+
+            } catch (error) {
+                console.error("خطا در راه‌اندازی فایربیس:", error);
+                showToast('خطا در اتصال به دیتابیس', 'error');
+            }
+        }
+
+        // نمایش/پنهان کردن پنل مدیریت
+        function toggleAdminPanel(isLoggedIn) {
+            const adminPanel = document.getElementById('admin-panel');
+            adminPanel.classList.toggle('hidden', !isLoggedIn);
+        }
+
+        // گوش دادن به داده‌های محصولات از فایراستور
+        function startDataListener(skipAuthCheck = false) {
+            if (!db) return; 
+
+            // مسیر برای داده‌های عمومی: /artifacts/{appId}/public/data/logos
+            const logosCollectionRef = collection(db, `artifacts/${appId}/public/data/logos`);
+            const q = query(logosCollectionRef);
+
+            onSnapshot(q, (snapshot) => {
+                products = [];
+                snapshot.forEach((doc) => {
+                    products.push({ id: doc.id, ...doc.data() });
+                });
+                // مرتب‌سازی بر اساس زمان ایجاد (جدیدترین اول)
+                products.sort((a, b) => (b.createdAt?.toMillis() || 0) - (a.createdAt?.toMillis() || 0));
+                
+                renderProducts();
+            }, (error) => {
+                console.error("خطا در دریافت داده‌ها از فایراستور:", error);
+                showToast('خطا در بارگذاری محصولات', 'error');
+            });
+        }
+
+        // افزودن محصول جدید به فایراستور
+        window.addNewProduct = async function(e) {
+            e.preventDefault();
+            if (!currentUserId) {
+                showToast('لطفاً وارد شوید تا بتوانید محصول اضافه کنید.', 'error');
+                return;
+            }
+
+            const title = document.getElementById('new-title').value;
+            const price = parseInt(document.getElementById('new-price').value);
+            const category = document.getElementById('new-category').value;
+            const description = document.getElementById('new-description').value;
+            const imageUrl = document.getElementById('new-image').value; // دریافت لینک تصویر
+
+            try {
+                const logosCollectionRef = collection(db, `artifacts/${appId}/public/data/logos`);
+                await addDoc(logosCollectionRef, {
+                    title: title,
+                    price: price,
+                    category: category,
+                    description: description,
+                    imageUrl: imageUrl || null, // ذخیره لینک تصویر (اگر وارد شده باشد)
+                    creatorId: currentUserId,
+                    createdAt: serverTimestamp() 
+                });
+
+                showToast('لوگوی جدید با موفقیت اضافه شد');
+                e.target.reset();
+                window.location.href = "#products";
+            } catch (error) {
+                console.error("خطا در افزودن سند جدید:", error);
+                showToast('خطا در ثبت محصول در دیتابیس', 'error');
+            }
+        }
+
+        // ===========================================
+        // 4. توابع رندرینگ UI و تعاملات
+        // ===========================================
+
+        // رندر کردن محصولات در گرید
+        window.renderProducts = function(filter = 'all') {
+            const grid = document.getElementById('product-grid');
+            grid.innerHTML = '';
+
+            const filteredProducts = filter === 'all' ? products : products.filter(p => p.category === filter);
+
+            if(filteredProducts.length === 0) {
+                grid.innerHTML = '<p class="text-center col-span-full text-gray-500 py-10">هیچ محصولی برای نمایش یافت نشد.</p>';
+                return;
+            }
+
+            filteredProducts.forEach(product => {
+                const card = document.createElement('div');
+                card.className = 'product-card bg-white rounded-2xl shadow-lg border border-gray-100 overflow-hidden group flex flex-col';
+                
+                // Content for the card - Placeholder (بدون نمایش تصویر)
+                card.innerHTML = `
+                    <div class="h-40 relative bg-primary/10 flex items-center justify-center p-4">
+                        <i data-lucide="scan" class="w-16 h-16 text-primary opacity-50"></i>
+                        <span class="absolute top-3 left-3 text-xs font-semibold text-gray-500 bg-white/70 backdrop-blur-sm px-2 py-1 rounded">${product.category}</span>
+                        ${product.imageUrl ? '<span class="absolute top-3 right-3 text-xs font-semibold text-green-600 bg-white/70 backdrop-blur-sm px-2 py-1 rounded"><i data-lucide="link" class="w-3 h-3 inline-block ml-1"></i>لینک عکس موجود</span>' : ''}
+                    </div>
+                    <div class="p-5 flex-grow flex flex-col justify-between">
+                        <div>
+                            <h3 class="font-bold text-gray-900 text-lg mb-2 line-clamp-1">${product.title}</h3>
+                            <p class="text-sm text-gray-600 line-clamp-2">${product.description || 'توضیحات پیش‌فرض.'}</p>
+                            <span class="text-xl font-bold text-accent block mt-3">${formatPrice(product.price)}</span>
+                        </div>
+                        <button onclick="addToCart('${product.id}')" class="w-full mt-4 py-2 rounded-lg border border-gray-200 text-gray-600 hover:border-primary hover:text-primary transition-colors text-sm font-medium flex items-center justify-center gap-2">
+                            <i data-lucide="plus-circle" class="w-4 h-4"></i>
+                            انتخاب طرح
+                        </button>
+                    </div>
+                `;
+                grid.appendChild(card);
+            });
+            lucide.createIcons();
+        }
+
+        // فیلتر کردن محصولات
+        window.filterProducts = function(category) {
+            document.querySelectorAll('.filter-btn').forEach(btn => {
+                if(btn.getAttribute('onclick').includes(category)) {
+                    btn.classList.remove('bg-gray-200', 'text-gray-700');
+                    btn.classList.add('bg-gray-900', 'text-white');
+                } else {
+                    btn.classList.add('bg-gray-200', 'text-gray-700');
+                    btn.classList.remove('bg-gray-900', 'text-white');
+                }
+            });
+            renderProducts(category);
+        }
+
+        // افزودن به سبد خرید
+        window.addToCart = function(id) {
+            const product = products.find(p => p.id === id);
+            if (cart.find(item => item.id === id)) {
+                showToast('این طرح قبلاً انتخاب شده است', 'error');
+                return;
+            }
+            cart.push(product);
+            updateCartUI();
+            showToast('به لیست سفارش اضافه شد');
+        }
+
+        // حذف از سبد خرید
+        window.removeFromCart = function(id) {
+            cart = cart.filter(item => item.id !== id);
+            updateCartUI();
+        }
+
+        // به‌روزرسانی نمایش سبد خرید
+        function updateCartUI() {
+            const cartItems = document.getElementById('cart-items');
+            const cartCount = document.getElementById('cart-count');
+            const cartTotal = document.getElementById('cart-total');
+            const emptyMsg = document.getElementById('empty-cart-msg');
+
+            cartCount.textContent = cart.length;
+            cartCount.classList.toggle('scale-0', cart.length === 0);
+
+            if (cart.length === 0) {
+                cartItems.innerHTML = '';
+                cartItems.appendChild(emptyMsg);
+                emptyMsg.style.display = 'block';
+            } else {
+                emptyMsg.style.display = 'none';
+                cartItems.innerHTML = cart.map(item => `
+                    <li class="flex py-4 gap-4 items-center">
+                        <div class="h-10 w-10 flex-shrink-0 flex items-center justify-center rounded-md border border-gray-200 bg-gray-50">
+                            <i data-lucide="scan" class="w-6 h-6 text-gray-400"></i>
+                        </div>
+                        <div class="flex flex-1 flex-col justify-center">
+                            <div class="flex justify-between text-sm font-medium text-gray-900">
+                                <h3 class="line-clamp-1">${item.title}</h3>
+                                <button onclick="removeFromCart('${item.id}')" class="text-red-500 hover:text-red-700"><i data-lucide="trash-2" class="w-4 h-4"></i></button>
+                            </div>
+                            <p class="text-xs text-gray-500 mt-1">${formatPrice(item.price)}</p>
+                        </div>
+                    </li>
+                `).join('');
+                lucide.createIcons();
+            }
+
+            const total = cart.reduce((sum, item) => sum + item.price, 0);
+            cartTotal.textContent = formatPrice(total);
+        }
+
+        // باز و بسته کردن سبد خرید (Side Panel)
+        window.toggleCart = function() {
+            const modal = document.getElementById('cart-modal');
+            const backdrop = document.getElementById('cart-backdrop');
+            const panel = document.getElementById('cart-panel');
+            
+            if (modal.classList.contains('hidden')) {
+                modal.classList.remove('hidden');
+                setTimeout(() => {
+                    backdrop.classList.remove('opacity-0');
+                    panel.classList.remove('-translate-x-full');
+                }, 10);
+            } else {
+                backdrop.classList.add('opacity-0');
+                panel.classList.add('-translate-x-full');
+                setTimeout(() => modal.classList.add('hidden'), 500);
+            }
+        }
+
+        // ثبت سفارش و ارسال به تلگرام
+        window.checkoutToTelegram = function() {
+            if (cart.length === 0) {
+                showToast('لیست سفارش خالی است', 'error');
+                return;
+            }
+
+            let message = "سلام، سفارش طراحی لوگو دارم:\n\n";
+            let total = 0;
+            
+            cart.forEach((item, index) => {
+                message += `${index + 1}. ${item.title}`;
+                if (item.imageUrl) message += ` (لینک تصویر: ${item.imageUrl})`;
+                message += ` - ${formatPrice(item.price)}\n`;
+                total += item.price;
+            });
+            
+            message += `\n----------------\nمبلغ کل: ${formatPrice(total)}\n\n`;
+            message += `این سفارش از طریق فروشگاه آنلاین شما ثبت شده است.`;
+
+
+            // کپی متن به کلیپ‌بورد
+            navigator.clipboard.writeText(message).then(() => {
+                showToast('متن سفارش کپی شد! باز کردن تلگرام...');
+            }).catch(() => {
+                console.error("Clipboard error: Could not copy text.");
+                showToast('خطا در کپی، لطفاً دستی متن را کپی کنید.', 'error');
+            });
+
+            // باز کردن تلگرام با تأخیر
+            setTimeout(() => {
+                window.location.href = "https://t.me/Logo_design103"; 
+            }, 1000);
+        }
+
+        // نمایش پیام Toast - بخش رفع خطا
+        window.showToast = function(message, type = 'success') {
+            const toast = document.getElementById('toast');
+            const toastMsg = document.getElementById('toast-message');
+            // با استفاده از ID منحصر به فرد، آیکون را مستقیما بازیابی می‌کنیم.
+            const toastIcon = document.getElementById('toast-icon');
+            
+            // اگر هر یک از المان‌های حیاتی پیدا نشد، از ادامه تابع جلوگیری می‌کنیم تا خطایی رخ ندهد.
+            if (!toast || !toastMsg || !toastIcon) {
+                console.warn("Cannot show toast: Toast elements not found or incomplete.");
+                return;
+            }
+
+            toastMsg.textContent = message;
+            
+            const isError = type === 'error';
+            // استفاده از setAttribute بر روی المان پیدا شده
+            toastIcon.setAttribute('data-lucide', isError ? 'x-circle' : 'check-circle'); 
+            toastIcon.classList.toggle('text-green-400', !isError);
+            toastIcon.classList.toggle('text-red-400', isError);
+            
+            lucide.createIcons(); // این برای تبدیل data-lucide به SVG ضروری است
+
+            toast.classList.remove('translate-y-20', 'opacity-0');
+            setTimeout(() => toast.classList.add('translate-y-20', 'opacity-0'), 3000);
+        }
+
+        // اجرای اولیه هنگام بارگذاری صفحه
+        document.addEventListener('DOMContentLoaded', initFirebase);
+    </script>
+
+    <script>
+        // پیکربندی Tailwind
+        tailwind.config = {
+            theme: {
+                extend: {
+                    fontFamily: {
+                        sans: ['Vazirmatn', 'sans-serif'],
+                    },
+                    colors: {
+                        primary: '#6366f1', 
+                        secondary: '#4f46e5',
+                        accent: '#ec4899', 
+                    }
+                }
+            }
+        }
+    </script>
+</head>
+<body class="bg-gray-50 text-gray-800 flex flex-col min-h-screen">
+
+    <!-- نوار ناوبری -->
+    <nav class="bg-white shadow-md sticky top-0 z-50">
+        <div class="max-w-7xl mx-auto px-4 sm:px-6 lg:px-8">
+            <div class="flex justify-between h-20 items-center">
+                <div class="flex items-center gap-2">
+                    <i data-lucide="pen-tool" class="text-primary w-8 h-8 stroke-2"></i>
+                    <span class="text-2xl font-bold text-gray-900 tracking-tight">لوگو <span class="text-primary">شاپ</span></span>
+                </div>
+                
+                <div class="hidden md:flex space-x-8 space-x-reverse text-gray-600">
+                    <a href="#" class="hover:text-primary transition-colors font-medium">خانه</a>
+                    <a href="#products" class="hover:text-primary transition-colors font-medium">گالری طرح‌ها</a>
+                    <a href="#admin-panel" class="text-accent font-medium hover:text-accent/80">پنل مدیریت (فقط برای شما)</a>
+                </div>
+
+                <div class="flex items-center gap-4">
+                    <button onclick="toggleCart()" class="relative p-2 text-gray-600 hover:text-primary transition-colors group">
+                        <i data-lucide="shopping-cart" class="w-6 h-6"></i>
+                        <span id="cart-count" class="absolute -top-1 -right-1 bg-accent text-white text-xs font-bold rounded-full w-5 h-5 flex items-center justify-center transform scale-0 transition-transform duration-200">0</span>
+                    </button>
+                </div>
+            </div>
+        </div>
+    </nav>
+
+    <!-- بخش Hero (اصلی) -->
+    <header class="bg-white overflow-hidden relative border-b border-gray-100">
+        <div class="max-w-7xl mx-auto px-4 sm:px-6 lg:px-8 py-16 text-center">
+            <h1 class="text-4xl md:text-6xl font-extrabold text-gray-900 mb-6">
+                طراحی لوگوهای مفهومی و آماده
+            </h1>
+            <p class="text-lg text-gray-600 mb-8 max-w-2xl mx-auto">
+                طرح‌های موجود را ببینید و برای سفارش پروژه اختصاصی خود مستقیماً از طریق تلگرام با ما در تماس باشید.
+            </p>
+            <!-- دکمه مشاهده نمونه کارها (لینک مستقیم به تلگرام) -->
+            <a href="https://t.me/Logo_design103" target="_blank" class="bg-primary hover:bg-secondary text-white px-8 py-3 rounded-xl font-bold text-lg shadow-lg transition-all inline-flex items-center gap-2">
+                مشاهده نمونه کارها و سفارش
+                <i data-lucide="arrow-up-right" class="w-5 h-5"></i>
+            </a>
+        </div>
+    </header>
+
+    <!-- بخش محصولات (گالری) -->
+    <main id="products" class="flex-grow max-w-7xl mx-auto px-4 sm:px-6 lg:px-8 py-16 w-full">
+        
+        <div class="flex flex-col md:flex-row justify-between items-center mb-10 gap-4">
+            <h2 class="text-3xl font-bold text-gray-900">طرح‌های موجود در انبار</h2>
+            <!-- فیلترهای محصولات -->
+            <div class="flex flex-wrap gap-2">
+                <button onclick="filterProducts('all')" class="filter-btn active bg-gray-900 text-white px-4 py-2 rounded-lg text-sm font-medium">همه</button>
+                <button onclick="filterProducts('logo')" class="filter-btn bg-gray-200 text-gray-700 px-4 py-2 rounded-lg text-sm font-medium">لوگو</button>
+                <button onclick="filterProducts('banner')" class="filter-btn bg-gray-200 text-gray-700 px-4 py-2 rounded-lg text-sm font-medium">بنر</button>
+            </div>
+        </div>
+
+        <!-- گرید نمایش محصولات -->
+        <div id="product-grid" class="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-3 xl:grid-cols-4 gap-8">
+            <!-- در حال بارگذاری اولیه -->
+            <p class="col-span-full text-center text-gray-400 py-10">در حال بارگذاری طرح‌ها...</p>
+        </div>
+
+    </main>
+
+    <!-- پنل ادمین (فقط برای شما) -->
+    <section id="admin-panel" class="bg-gray-100 py-16 border-t border-gray-200 hidden">
+        <div class="max-w-3xl mx-auto px-4">
+            <div class="bg-white p-8 rounded-2xl shadow-xl border border-accent/20">
+                <div class="flex items-center gap-3 mb-6">
+                    <div class="bg-accent/10 p-3 rounded-full">
+                        <i data-lucide="shield-check" class="w-8 h-8 text-accent"></i>
+                    </div>
+                    <h2 class="text-2xl font-bold text-gray-800">پنل مدیریت: افزودن طرح جدید</h2>
+                </div>
+                
+                <form onsubmit="addNewProduct(event)" class="space-y-4">
+                    <div class="grid grid-cols-1 md:grid-cols-2 gap-4">
+                        <div>
+                            <label class="block text-sm font-medium text-gray-700 mb-1">عنوان طرح</label>
+                            <input type="text" id="new-title" required class="w-full px-4 py-2 border rounded-lg focus:ring-2 focus:ring-primary focus:border-transparent" placeholder="مثلا: لوگوی مدرن رستوران">
+                        </div>
+                        <div>
+                            <label class="block text-sm font-medium text-gray-700 mb-1">قیمت (تومان)</label>
+                            <input type="number" id="new-price" required class="w-full px-4 py-2 border rounded-lg focus:ring-2 focus:ring-primary focus:border-transparent" placeholder="450000">
+                        </div>
+                    </div>
+                    
+                    <div class="grid grid-cols-1 md:grid-cols-2 gap-4">
+                        <div>
+                            <label class="block text-sm font-medium text-gray-700 mb-1">دسته‌بندی</label>
+                            <select id="new-category" class="w-full px-4 py-2 border rounded-lg">
+                                <option value="logo">لوگو</option>
+                                <option value="banner">بنر</option>
+                                <option value="poster">پوستر</option>
+                            </select>
+                        </div>
+                        <div>
+                            <label class="block text-sm font-medium text-gray-700 mb-1">توضیحات کوتاه</label>
+                            <input type="text" id="new-description" required class="w-full px-4 py-2 border rounded-lg" placeholder="توضیحی درباره سبک طرح">
+                        </div>
+                    </div>
+
+                    <!-- فیلد لینک تصویر (به دلیل محدودیت ذخیره‌سازی فایل، این روش باید حفظ شود) -->
+                    <div>
+                        <label class="block text-sm font-medium text-gray-700 mb-1">لینک مستقیم تصویر (اختیاری)</label>
+                        <input type="url" id="new-image" class="w-full px-4 py-2 border rounded-lg ltr text-left focus:ring-2 focus:ring-accent focus:border-transparent" placeholder="https://yourdomain.com/image.jpg">
+                        <p class="text-xs text-red-500 mt-1">تذکر: به‌جای آپلود مستقیم فایل، لینک تصویر را از یک هاست خارجی وارد کنید تا داده به‌صورت دائمی ذخیره شود.</p>
+                    </div>
+
+                    <button type="submit" class="w-full bg-accent hover:bg-accent/90 text-white py-3 rounded-lg font-bold transition-colors shadow-md mt-4 flex items-center justify-center gap-2">
+                        <i data-lucide="upload" class="w-5 h-5"></i>
+                        افزودن طرح به فایراستور
+                    </button>
+                </form>
+            </div>
+        </div>
+    </section>
+
+    <!-- سبد خرید (Side Panel) و Toast -->
+    <div id="cart-modal" class="fixed inset-0 z-[60] hidden" aria-labelledby="slide-over-title" role="dialog" aria-modal="true">
+        <div class="absolute inset-0 overflow-hidden">
+            <!-- بکدراپ -->
+            <div id="cart-backdrop" class="absolute inset-0 bg-gray-500 bg-opacity-75 transition-opacity opacity-0" onclick="toggleCart()"></div>
+            <div class="pointer-events-none fixed inset-y-0 left-0 flex max-w-full pl-0 sm:pl-10">
+                <!-- پنل سبد خرید -->
+                <div id="cart-panel" class="pointer-events-auto w-screen max-w-md transform transition ease-in-out duration-500 -translate-x-full bg-white shadow-xl flex flex-col h-full">
+                    <div class="flex-1 overflow-y-auto py-6 px-4">
+                        <div class="flex items-start justify-between">
+                            <h2 class="text-lg font-medium text-gray-900">لیست سفارش</h2>
+                            <button onclick="toggleCart()" class="-m-2 p-2 text-gray-400 hover:text-gray-500">
+                                <i data-lucide="x" class="w-6 h-6"></i>
+                            </button>
+                        </div>
+                        <div class="mt-8">
+                            <ul id="cart-items" class="-my-6 divide-y divide-gray-200">
+                                <li id="empty-cart-msg" class="py-10 text-center text-gray-500">لیست خالی است.</li>
+                            </ul>
+                        </div>
+                    </div>
+                    <!-- جمع کل و دکمه تسویه حساب -->
+                    <div class="border-t border-gray-200 py-6 px-4 bg-gray-50">
+                        <div class="flex justify-between text-base font-medium text-gray-900 mb-4">
+                            <p>مجموع</p>
+                            <p id="cart-total">0 تومان</p>
+                        </div>
+                        <p class="text-sm text-gray-500 mb-4 text-center">
+                            لیست سفارش کپی شده و تلگرام باز می‌شود.
+                        </p>
+                        <button onclick="checkoutToTelegram()" class="flex items-center justify-center gap-2 rounded-md border border-transparent bg-[#229ED9] hover:bg-[#1e8wb8] px-6 py-3 text-base font-medium text-white shadow-sm w-full transition-colors">
+                            <i data-lucide="send" class="w-5 h-5"></i>
+                            ارسال سفارش به تلگرام
+                        </button>
+                    </div>
+                </div>
+            </div>
+        </div>
+    </div>
+
+    <!-- Toast Notification (پیام‌های کوتاه) -->
+    <div id="toast" class="fixed bottom-5 left-5 bg-gray-900 text-white px-6 py-3 rounded-lg shadow-xl transform translate-y-20 opacity-0 transition-all duration-300 z-[70] flex items-center gap-3">
+        <!-- اضافه کردن ID منحصر به فرد به آیکون -->
+        <i id="toast-icon" data-lucide="check-circle" class="text-green-400"></i>
+        <span id="toast-message">پیام</span>
+    </div>
+</body>
+</html>
